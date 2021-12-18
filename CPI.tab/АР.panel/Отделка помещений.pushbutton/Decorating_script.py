@@ -27,6 +27,15 @@ REPORT_ON = not __shiftclick__
 # REPORT_ON = __shiftclick__  # Отчёт не выводится. Shift + Клик включает вывод отчёта
 # ↑↑↑ ↑↑↑ ↑↑↑ ↑↑↑ Раскомментируй эту строку ↑↑↑ ↑↑↑ ↑↑↑ ↑↑↑
 
+
+def to_mm(feet_val):
+    return round(feet_val * FEET_TO_MM, 0)
+
+
+def to_sq(sq):
+    return round(sq * F2_TO_M2, 2)
+
+
 def flatten(two_dim_list):  # https://stackoverflow.com/a/952952
     return [item for sublist in two_dim_list for item in sublist]
 
@@ -143,7 +152,7 @@ class Room():  # Основной расчёт помещений
         self.guard_width = room.Look("CPI_Отбойник_Ширина")
         self.guard_height = room.Look("CPI_Отбойник_Отметка верха")
         self.guard_reserve = room.Look("CPI_Отбойник_Запас") or 0
-        self.guard_lenth = 0 + self.guard_reserve * M_TO_FEET
+        self.guard_lenth = 0 + self.guard_reserve
         self.apron_on = room.Look("CPI_Фартук_Наличие")
         self.apron_width = room.Look("CPI_Фартук_Ширина")
         self.apron_height = room.Look("CPI_Фартук_Высота")
@@ -309,16 +318,16 @@ with forms.ProgressBar(title=title, cancellable=True) as pb:
     for room in rooms:
         if not REPORT_ON:
             continue
-        finish_area = 'Sч = {:n} м²'.format(round(
-            room.final_decor_area * F2_TO_M2, 2))
+        finish_area = 'Sч = {:n} м²'.format(to_sq(room.final_decor_area))
         prep_areas = '<br>'\
             .join([finish_area] + ['S{} = {:n} м²'.format(
                 decor_base.lower(),
-                round(room.prep_decor_area[decor_base] * F2_TO_M2, 2)
+                to_sq(room.prep_decor_area[decor_base])
             )
                 for decor_base in room.prep_decor_area])
-        room_info = '{} {}<br>{}' \
-            .format(output.linkify(room.origin.Id,
+        room_info = '{}<br>{} {}<br>{}' \
+            .format(i + 1,
+                    output.linkify(room.origin.Id,
                                    room.origin.Look('Номер')),
                     room.origin.Look('Имя'),
                     prep_areas,
@@ -329,22 +338,25 @@ with forms.ProgressBar(title=title, cancellable=True) as pb:
         aps_area = 0
         perim = 0
         for i_seg, seg in enumerate(room.segments):
-            seg_area = seg.length * room.final_decor_heigth * F2_TO_M2
+            seg_area = to_sq(seg.length * room.final_decor_heigth)
             segs_area += seg_area
-            perim += round(seg.length * FEET_TO_MM, 0)
+            perim += seg.length
+            # if len(rooms) < 4:
+            room_mark = output.linkify(seg.host_id, '{} {}'.format(i_seg + 1, seg.decor_base))
+            # else:
+                # room_mark = '{} {}'.format(i_seg + 1, seg.decor_base)
             walls_info.append(
-                '{} L = {:n} ({:n}), h = {:n} ({:n}), S = {:n} ({:n})'.format(
-                    output.linkify(seg.host_id,
-                                   '{} {}'.format(i_seg + 1, seg.decor_base)),
-                    round(seg.length * FEET_TO_MM, 0),
-                    perim,
-                    round(room.final_decor_heigth * FEET_TO_MM, 0),
-                    round(room.full_heigth * FEET_TO_MM, 0),
-                    round(seg_area, 2),
-                    round(segs_area, 2))
+                '{}: L = {:n} ({:n}), h = {:n} ({:n}), S = {:n} ({:n})'.format(
+                    room_mark,
+                    to_mm(seg.length),
+                    to_mm(perim),
+                    to_mm(room.final_decor_heigth),
+                    to_mm(room.full_heigth),
+                    seg_area,
+                    segs_area)
             )
             for i_ap, ap in enumerate(seg.apertures):
-                ap_area = round(get_area(ap) * F2_TO_M2, 2)
+                ap_area = to_sq(get_area(ap))
                 aps_area += ap_area
                 apertures_info.append(
                     '{} S = {:n} ({:n})'.format(
@@ -354,25 +366,25 @@ with forms.ProgressBar(title=title, cancellable=True) as pb:
                         aps_area)
                 )
         baseboard_info = '{:n}<br>h={:n}'.format(
-            room.baseboard_lenth * FEET_TO_MM,
-            room.baseboard_height * FEET_TO_MM
+            to_mm(room.baseboard_lenth),
+            to_mm(room.baseboard_height)
         )
-        diff = room.guard_lenth * FEET_TO_MM - room.guard_reserve * 1000
+        diff = room.guard_lenth - room.guard_reserve
         guardrail_info = \
             '{:n}{}<br>Ш = {:n} мм<br>Отм. в. {:n} мм<br>S = {:n} м²'.format(
-                room.guard_lenth * FEET_TO_MM,
+                to_mm(room.guard_lenth),
                 ' =<br>{:n}{}{:n}'.format(
-                    diff,
+                    to_mm(diff),
                     ' + ' if room.guard_reserve > 0 else ' ',
-                    room.guard_reserve * 1000) if room.guard_reserve else '',
-                room.guard_width * FEET_TO_MM,
-                room.guard_height * FEET_TO_MM,
-                room.guard_width * room.guard_lenth * F2_TO_M2,
+                    to_mm(room.guard_reserve)) if room.guard_reserve else '',
+                to_mm(room.guard_width),
+                to_mm(room.guard_height),
+                to_sq(room.guard_width * room.guard_lenth),
             )
         apron_info = '{:n} м² =<br>{:n}×{:n}'.format(
-            room.apron_area * F2_TO_M2,
-            room.apron_width * FEET_TO_MM,
-            room.apron_height * FEET_TO_MM,
+            to_sq(room.apron_area),
+            to_mm(room.apron_width),
+            to_mm(room.apron_height),
         )
         report.append([room_info,
                        '<br>'.join(walls_info),
