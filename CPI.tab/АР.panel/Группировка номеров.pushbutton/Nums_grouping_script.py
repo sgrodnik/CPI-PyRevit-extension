@@ -27,6 +27,9 @@ EXCLUDED_NAMES = [
     'вакуационный выход',
 ]
 
+SIMPLE_MODE = False
+# SIMPLE_MODE = True
+
 
 class Lookuper(object):  # https://stackoverflow.com/a/16185009
     """Wrapper for adding a bit of syntactic sugar to Elements.
@@ -99,9 +102,12 @@ def get_grouped_numbers(rooms):
     groups = [[]]
     for nums in nums_by_prefix.values():
         for i, numo in enumerate(nums):
-            if len(nums) > 2:
-                if i > 0 and nums[i].int != nums[i - 1].int + 1:
-                    groups.append([])
+            if SIMPLE_MODE:
+                groups.append([])
+            else:
+                if len(nums) > 2:
+                    if i > 0 and nums[i].int != nums[i - 1].int + 1:
+                        groups.append([])
             groups[-1].append(numo)
             if i == len(nums) - 1:
                 groups.append([])
@@ -121,6 +127,8 @@ def get_grouped_numbers(rooms):
         if numo.prefix:
             if len(group) == 2:
                 s = '{0}.{1}, {0}.{2}'.format(numo.prefix, group[0].base, group[-1].base)
+                if group[0].base == group[-1].base:
+                    s = '{0}.{1}'.format(numo.prefix, group[0].base)
             else:
                 if group[0].base != group[-1].base:
                     s = '{0}.{1}÷{0}.{2}'.format(numo.prefix, group[0].base, group[-1].base)
@@ -129,6 +137,8 @@ def get_grouped_numbers(rooms):
         else:
             if len(group) == 2:
                 s = '{}, {}'.format(group[0].base, group[-1].base)
+                if group[0].base == group[-1].base:
+                    s = '{}'.format(group[0].base)
             else:
                 if group[0].base != group[-1].base:
                     s = '{}÷{}'.format(group[0].base, group[-1].base)
