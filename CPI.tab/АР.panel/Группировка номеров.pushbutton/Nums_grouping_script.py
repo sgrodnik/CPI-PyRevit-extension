@@ -27,6 +27,9 @@ EXCLUDED_NAMES = [
     'вакуационный выход',
 ]
 
+SIMPLE_MODE = False
+# SIMPLE_MODE = True
+
 
 class Lookuper(object):  # https://stackoverflow.com/a/16185009
     """Wrapper for adding a bit of syntactic sugar to Elements.
@@ -99,9 +102,12 @@ def get_grouped_numbers(rooms):
     groups = [[]]
     for nums in nums_by_prefix.values():
         for i, numo in enumerate(nums):
-            if len(nums) > 2:
-                if i > 0 and nums[i].int != nums[i - 1].int + 1:
-                    groups.append([])
+            if SIMPLE_MODE:
+                groups.append([])
+            else:
+                if len(nums) > 2:
+                    if i > 0 and nums[i].int != nums[i - 1].int + 1:
+                        groups.append([])
             groups[-1].append(numo)
             if i == len(nums) - 1:
                 groups.append([])
