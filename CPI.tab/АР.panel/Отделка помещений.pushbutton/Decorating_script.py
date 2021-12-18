@@ -406,19 +406,29 @@ with forms.ProgressBar(title=title, cancellable=True) as pb:
 
 if REPORT_ON:
     if report:
-        output.print_table(  # Вывод отчёта
-            table_data=report,
-            columns=[
-                'Помещение, м²',
-                'Стены: Длина, мм (Σмм); Высота (черновая), мм; Площадь, м² (Σм²)',
-                'Проёмы: площадь, м² (Σм²)',
-                'Плинтус',
-                '<p title="Пороговая ширина отбойника для учёта его площади в'
-                + 'чистовой отделке составляет {0:n} мм">Отбойник {0:n}</p>'
-                .format(GUARD_THRESHOLD * FEET_TO_MM),
-                'Фартук',
-            ]
-        )
+        LIMIT = 10
+        reports = []
+        for i in range(len(report)):
+            if len(report) >= LIMIT:
+                reports.append(report[:LIMIT])
+                report = report[LIMIT:]
+            else:
+                reports.append(report) if report else None
+                break
+        for report in reports:
+            output.print_table(  # Вывод отчёта
+                table_data=report,
+                columns=[
+                    'Помещение, м²',
+                    'Стены: Длина, мм (Σмм); Высота (черновая), мм; Площадь, м² (Σм²)',
+                    'Проёмы: площадь, м² (Σм²)',
+                    'Плинтус',
+                    '<p title="Пороговая ширина отбойника для учёта его площади в'
+                    + 'чистовой отделке составляет {0:n} мм">Отбойник {0:n}</p>'
+                    .format(GUARD_THRESHOLD * FEET_TO_MM),
+                    'Фартук',
+                ]
+            )
     rooms_off = [r for r in all_rooms if not r.LookupParameter('CPI_Подсчёт отделки').AsInteger()]
     print('\nПомещений в проекте всего: {}'.format(len(all_rooms)))
     print('Помещений с нулевой площадью: {}'.format(len([r for r in all_rooms if r.Area == 0])))
