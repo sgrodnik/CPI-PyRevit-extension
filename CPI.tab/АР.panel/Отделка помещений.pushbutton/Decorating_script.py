@@ -3,20 +3,29 @@
 
 from Autodesk.Revit.DB import BuiltInCategory as bic
 from collections import namedtuple
-from pyrevit import script
+from pyrevit import script, forms
 import Autodesk.Revit.DB as db
-import re
-
-FEET_TO_MM = 304.8
-MM_TO_FEET = 1 / FEET_TO_MM
-F2_TO_M2 = FEET_TO_MM ** 2 / 1000000
 
 doc = __revit__.ActiveUIDocument.Document
 uidoc = __revit__.ActiveUIDocument
 output = script.get_output()
 
-seb_options = db.SpatialElementBoundaryOptions()
+FEET_TO_MM = 304.8
+FEET_TO_M = 304.8 / 1000
+MM_TO_FEET = 1 / FEET_TO_MM
+M_TO_FEET = 1 / FEET_TO_M
+F2_TO_M2 = FEET_TO_MM**2 / 10**6
 
+# Значение, после превышения которого скрипт будет вычитать площадь отбойника
+# из площади чистовой отделки
+GUARD_THRESHOLD = 500 * MM_TO_FEET  # Пороговое значение учёта отбойника
+
+# Следующую строку трогать не нужно
+REPORT_ON = not __shiftclick__
+# Поведение по умолчанию в части вывода отчёта можно переключить,
+# раскоментировав последующую строку
+# REPORT_ON = __shiftclick__  # Отчёт не выводится. Shift + Клик включает вывод отчёта
+# ↑↑↑ ↑↑↑ ↑↑↑ ↑↑↑ Раскомментируй эту строку ↑↑↑ ↑↑↑ ↑↑↑ ↑↑↑
 
 def flatten(two_dim_list):  # https://stackoverflow.com/a/952952
     return [item for sublist in two_dim_list for item in sublist]
@@ -46,11 +55,8 @@ class Lookuper(object):  # https://stackoverflow.com/a/16185009
                 else None
         return getattr(self.obj, name)
 
-    def __repr__(self):
-        return self.obj.__repr__() + '*'
-
     def __str__(self):
-        return self.obj.__repr__() + '**'
+        return self.obj.__repr__()
 
 
 def get_area(el):
@@ -71,14 +77,6 @@ def get_height(el):
     return height
 
 
-Segment = namedtuple('Segment', [
-    'length',
-    'decor_base',
-    'apertures',
-    'host_id',
-    'seg_prep_decor_area',
-])
-
 errs = {}  # Supposed to be {message: Set(element_ids_as_integer_value)}
 
 
@@ -95,13 +93,15 @@ def errors(message, element_ids=None):
 def parse_baseboard_height(room):
     param = room.Look('CPI_Плинтус_Описание')
     if not param:
-        return None
-    description = param.replace('мм', '')
+        return 0
+    description = param.replace('мм', '').replace('=', '').replace(',', '').replace('.', '')
     digits = [int(s) for s in description.split() if s.isdigit()]
-    return digits[0] if digits else None
+    return digits[0] if digits else 0
 
 
 def valid(instance):
+    if not instance:
+        return False
     if instance.Category.Name == '<Разделитель помещений>':
         return False
     if instance.LookupParameter('Семейство').AsValueString() == 'Витраж':
@@ -109,7 +109,16 @@ def valid(instance):
     return True
 
 
-class Room():
+Segment = namedtuple('Segment', [
+    'length',
+    'decor_base',
+    'apertures',
+    'host_id',
+    'seg_prep_decor_area',
+])
+
+
+class Room():  # Основной расчёт помещений
     """Wrapper for calculating the decorating of room"""
     objects = []
 
@@ -118,36 +127,67 @@ class Room():
         self.origin = room
         self.Id = room.Id
         self.full_heigth = room.Look("Полная высота")
-        self.ceiling_heigth = room.Look("W_Потолок_Высота") or self.full_heigth
+        self.perim = room.Look("Периметр")
+        self.ceiling_heigth = room.Look("CPI_Потолок_Высота") \
+            or self.full_heigth
         self.final_decor_heigth = min(self.ceiling_heigth + 100 * MM_TO_FEET,
                                       self.full_heigth)
         self.segments = []
         self.apertures_area = 0
         self.prep_decor_area = {}  # Supposed to be {decor_base: Area}
         self.final_decor_area = 0
+        self.baseboard_on = room.Look("CPI_Плинтус_Наличие")
         self.baseboard_lenth = 0
-        # self.baseboard_height = parse_baseboard_height(room)
-        for segment in flatten(room.GetBoundarySegments(seb_options)):
+        self.baseboard_height = parse_baseboard_height(room) * MM_TO_FEET
+        self.guard_on = room.Look("CPI_Отбойник_Наличие")
+        self.guard_width = room.Look("CPI_Отбойник_Ширина")
+        self.guard_height = room.Look("CPI_Отбойник_Отметка верха")
+        self.guard_reserve = room.Look("CPI_Отбойник_Запас") or 0
+        self.guard_lenth = 0 + self.guard_reserve * M_TO_FEET
+        self.apron_on = room.Look("CPI_Фартук_Наличие")
+        self.apron_width = room.Look("CPI_Фартук_Ширина")
+        self.apron_height = room.Look("CPI_Фартук_Высота")
+        self.apron_area = self.apron_width \
+            * self.apron_height if self.apron_on else 0
+        self.aperture_ids = []
+        for segment in flatten(
+                room.GetBoundarySegments(db.SpatialElementBoundaryOptions())):
             instance = doc.GetElement(segment.ElementId)
             if not valid(instance):
                 continue
             symbol = Lookuper(doc.GetElement(instance.GetTypeId()))
-            decor_base = symbol.Look('WH_Основа черновой отделки')
+            decor_base = symbol.Look('CPI_Основа черновой отделки')
             if not decor_base:
-                errors('Параметр "WH_Основа черновой отделки" не заполнен, \
-                        элемент исключён из расчёта',
+                errors('Параметр "CPI_Основа черновой отделки" не заполнен, \
+                        расчёт черновой отделки некорректен',
                        instance.Id.IntegerValue)
-                continue
+                # continue
+                decor_base = '???'
             length = segment.GetCurve().Length
             if decor_base not in self.prep_decor_area:
                 self.prep_decor_area[decor_base] = 0
             host_id = segment.ElementId.IntegerValue
-            apertures = apertures_by_host.get(host_id, [])
-            self.baseboard_lenth += length
+            apertures_ = apertures_by_host.get(host_id, [])
+            apertures = []
+            phase = doc.GetElement(room.Look('Стадия'))
+            for ap in apertures_:
+                if ap.Id in self.aperture_ids:
+                    continue
+                if (ap.FromRoom[phase] and ap.FromRoom[phase].Id.IntegerValue == room.Id.IntegerValue) \
+                        or (ap.ToRoom[phase] and ap.ToRoom[phase].Id.IntegerValue == room.Id.IntegerValue):
+                    self.aperture_ids.append(ap.Id)
+                    apertures.append(ap)
+            self.baseboard_lenth += length if self.baseboard_on else 0
+            self.guard_lenth += length if self.guard_on else 0
             for ap in apertures:
-                get_height(ap)
-                # check_for_baseboard(высотаРазмещенияПроёма, высотаПлинтуса)
-                self.baseboard_lenth -= 123
+                ap_sill_height = ap.get_Parameter(
+                    db.BuiltInParameter.INSTANCE_SILL_HEIGHT_PARAM).AsDouble()
+                if self.baseboard_on:
+                    if self.baseboard_height > ap_sill_height:
+                        self.baseboard_lenth -= get_width(ap)
+                if self.guard_on:
+                    if self.guard_height > ap_sill_height:
+                        self.guard_lenth -= get_width(ap)
             apertures_area = sum([get_area(ap) for ap in apertures])
             seg_prep_decor_area = length * self.full_heigth - apertures_area
             self.prep_decor_area[decor_base] += seg_prep_decor_area
@@ -161,9 +201,13 @@ class Room():
                 host_id=db.ElementId(host_id),
                 seg_prep_decor_area=seg_prep_decor_area,
             ))
+        if self.guard_width >= GUARD_THRESHOLD:
+            self.final_decor_area -= self.guard_width * self.guard_lenth
+        self.final_decor_area -= self.apron_area
+        self.number = room.Look("Номер")
 
-    def commit(self):
-        self.origin.LookupParameter('WS_Стены_Площадь чистовой отделки') \
+    def commit(self):  # Прописывание значений параметров
+        self.origin.LookupParameter('CPI_Чистовая_Площадь отделки') \
             .Set(self.final_decor_area)
         areas = {}  # Supposed to be {decor_base: [Area, ElementIds]}
         for seg in self.segments:
@@ -171,14 +215,19 @@ class Room():
                 areas[seg.decor_base] = [0, []]  # [Area, ElementIds]
             areas[seg.decor_base][0] += seg.seg_prep_decor_area
             areas[seg.decor_base][1].append(seg.host_id.IntegerValue)
-        for decor_base in areas:
-            par = self.origin.LookupParameter('WS_Стены_Площадь ' + decor_base)
+        for base in areas:
+            par = self.origin.LookupParameter(
+                'CPI_Черновая-' + base + '_Площадь')
             if par:
-                par.Set(areas[decor_base][0])
+                par.Set(areas[base][0])
             else:
-                errors('Не найден параметр "WS_Стены_Площадь {}", \
-                        значение не записано'.format(decor_base),
-                       areas[decor_base][1])
+                errors('Не найден параметр "CPI_Черновая-{0}_Площадь", \
+                        значение площади для "{0}" не записано'.format(base),
+                       areas[base][1])
+        self.origin.LookupParameter('CPI_Плинтус_Длина') \
+            .Set(self.baseboard_lenth)
+        self.origin.LookupParameter('CPI_Отбойник_Длина') \
+            .Set(self.guard_lenth)
 
 
 def pack_apertures_by_host(apertures):
@@ -202,14 +251,50 @@ def get_collector(cat_name, to_elements=True):
 # ----------------------------------- Main -----------------------------------
 # ----------------------------------------------------------------------------
 
+
 doors = get_collector('OST_Doors')
 windows = get_collector('OST_Windows')
-apertures = [Lookuper(el) for el in doors + windows]
+apertures = [Lookuper(el) for el in doors + windows if el.Host]
 apertures_by_host = pack_apertures_by_host(apertures)
 sel = [doc.GetElement(elid) for elid in uidoc.Selection.GetElementIds()]
 rooms = [el for el in sel if el.Category.Name == 'Помещения']
-rooms = rooms or get_collector('OST_Rooms')
-rooms = [Room(Lookuper(el)) for el in rooms if el.Area > 0]
+all_rooms = get_collector('OST_Rooms')
+rooms = rooms or all_rooms
+
+t = db.Transaction(doc, 'Отделка: Простановка галочек помещениям')
+t.Start()
+for room in rooms:
+    for param_name in ['CPI_Плинтус_Наличие',
+                       'CPI_Фартук_Наличие',
+                       'CPI_Отбойник_Наличие',
+                       'CPI_Подсчёт отделки']:
+        param = room.LookupParameter(param_name)
+        if not param.HasValue:
+            param.Set(1)
+t.Commit()
+
+rooms = [r for r in rooms if r.LookupParameter('CPI_Подсчёт отделки').AsInteger()]
+
+title = 'Основной расчёт'
+rooms_ = []
+with forms.ProgressBar(title=title, cancellable=True) as pb:
+    i = 0
+    for room in rooms:
+        if room.Area > 0:
+            rooms_.append(Room(Lookuper(room)))
+            pb.title = '{}: {} из {}: Помещение № {}'.format(title,
+                                                             i + 1,
+                                                             len(rooms),
+                                                             room.Number)
+        if pb.cancelled:
+            break
+        else:
+            pb.update_progress(i, len(rooms))
+        i += 1
+rooms = rooms_
+
+if pb.cancelled:
+    script.exit()
 
 t = db.Transaction(doc, 'Отделка')
 t.Start()
@@ -217,60 +302,131 @@ for room in rooms:
     room.commit()
 t.Commit()
 
-report = []
-for room in rooms:
-    finish_area = 'Sч = {:n}'.format(room.final_decor_area * F2_TO_M2)
-    prep_areas = '<br>'\
-        .join([finish_area] + ['S{} = {:n}'
-              .format(decor_base.lower(),
-                      room.prep_decor_area[decor_base] * F2_TO_M2)
-              for decor_base in room.prep_decor_area])
-    room_info = '{} {}<br>{}' \
-        .format(output.linkify(room.origin.Id,
-                               room.origin.Look('Номер')),
-                room.origin.Look('Имя'),
-                prep_areas,
-                )
-    walls_info = []
-    apertures_info = []
-    segs_area = 0
-    aps_area = 0
-    for i_seg, seg in enumerate(room.segments):
-        seg_area = seg.length * room.final_decor_heigth * F2_TO_M2
-        segs_area += seg_area
-        walls_info.append(
-            '{} L = {:n}, h = {:n} ({:n}), S = {:n} ({:n})'.format(
-                output.linkify(seg.host_id,
-                               '{} {}'.format(i_seg + 1, seg.decor_base)),
-                seg.length * FEET_TO_MM,
-                room.final_decor_heigth * FEET_TO_MM,
-                room.full_heigth * FEET_TO_MM,
-                seg_area,
-                segs_area)
-        )
-        for i_ap, ap in enumerate(seg.apertures):
-            ap_area = get_area(ap) * F2_TO_M2
-            aps_area += ap_area
-            apertures_info.append(
-                '{} S = {:n} ({:n})'.format(
-                    output.linkify(ap.Id, '{}.{}'.format(i_seg + 1, i_ap + 1)),
-                    ap_area,
-                    aps_area)
+title = 'Формирование отчёта'
+report = []  # Формирование отчёта
+with forms.ProgressBar(title=title, cancellable=True) as pb:
+    i = 0
+    for room in rooms:
+        if not REPORT_ON:
+            continue
+        finish_area = 'Sч = {:n} м²'.format(round(
+            room.final_decor_area * F2_TO_M2, 2))
+        prep_areas = '<br>'\
+            .join([finish_area] + ['S{} = {:n} м²'.format(
+                decor_base.lower(),
+                round(room.prep_decor_area[decor_base] * F2_TO_M2, 2)
             )
-    report.append([room_info,
-                   '<br>'.join(walls_info),
-                   '<br>'.join(apertures_info), ]
-                  )
+                for decor_base in room.prep_decor_area])
+        room_info = '{} {}<br>{}' \
+            .format(output.linkify(room.origin.Id,
+                                   room.origin.Look('Номер')),
+                    room.origin.Look('Имя'),
+                    prep_areas,
+                    )
+        walls_info = []
+        apertures_info = []
+        segs_area = 0
+        aps_area = 0
+        perim = 0
+        for i_seg, seg in enumerate(room.segments):
+            seg_area = seg.length * room.final_decor_heigth * F2_TO_M2
+            segs_area += seg_area
+            perim += round(seg.length * FEET_TO_MM, 0)
+            walls_info.append(
+                '{} L = {:n} ({:n}), h = {:n} ({:n}), S = {:n} ({:n})'.format(
+                    output.linkify(seg.host_id,
+                                   '{} {}'.format(i_seg + 1, seg.decor_base)),
+                    round(seg.length * FEET_TO_MM, 0),
+                    perim,
+                    round(room.final_decor_heigth * FEET_TO_MM, 0),
+                    round(room.full_heigth * FEET_TO_MM, 0),
+                    round(seg_area, 2),
+                    round(segs_area, 2))
+            )
+            for i_ap, ap in enumerate(seg.apertures):
+                ap_area = round(get_area(ap) * F2_TO_M2, 2)
+                aps_area += ap_area
+                apertures_info.append(
+                    '{} S = {:n} ({:n})'.format(
+                        output.linkify(ap.Id, '{}.{}'.format(i_seg + 1,
+                                                             i_ap + 1)),
+                        ap_area,
+                        aps_area)
+                )
+        baseboard_info = '{:n}<br>h={:n}'.format(
+            room.baseboard_lenth * FEET_TO_MM,
+            room.baseboard_height * FEET_TO_MM
+        )
+        diff = room.guard_lenth * FEET_TO_MM - room.guard_reserve * 1000
+        guardrail_info = \
+            '{:n}{}<br>Ш = {:n} мм<br>Отм. в. {:n} мм<br>S = {:n} м²'.format(
+                room.guard_lenth * FEET_TO_MM,
+                ' =<br>{:n}{}{:n}'.format(
+                    diff,
+                    ' + ' if room.guard_reserve > 0 else ' ',
+                    room.guard_reserve * 1000) if room.guard_reserve else '',
+                room.guard_width * FEET_TO_MM,
+                room.guard_height * FEET_TO_MM,
+                room.guard_width * room.guard_lenth * F2_TO_M2,
+            )
+        apron_info = '{:n} м² =<br>{:n}×{:n}'.format(
+            room.apron_area * F2_TO_M2,
+            room.apron_width * FEET_TO_MM,
+            room.apron_height * FEET_TO_MM,
+        )
+        report.append([room_info,
+                       '<br>'.join(walls_info),
+                       '<br>'.join(apertures_info),
+                       baseboard_info,
+                       guardrail_info,
+                       apron_info,
+                       ])
 
-output.print_table(
-    table_data=report,
-    columns=['Помещение', 'Стены', 'Проёмы', ],
-)
+        pb.title = '{}: {} из {}: Помещение № {}'.format(title,
+                                                         i + 1,
+                                                         len(rooms),
+                                                         room.number)
+        if pb.cancelled:
+            break
+        else:
+            pb.update_progress(i, len(rooms))
+        i += 1
 
-for message in errs:
-    print('Предупреждение: ' + message)
+if REPORT_ON:
+    if report:
+        output.print_table(  # Вывод отчёта
+            table_data=report,
+            columns=[
+                'Помещение, м²',
+                'Стены: Длина, мм (Σмм); Высота (черновая), мм; Площадь, м² (Σм²)',
+                'Проёмы: площадь, м² (Σм²)',
+                'Плинтус',
+                '<p title="Пороговая ширина отбойника для учёта его площади в'
+                + 'чистовой отделке составляет {0:n} мм">Отбойник {0:n}</p>'
+                .format(GUARD_THRESHOLD * FEET_TO_MM),
+                'Фартук',
+            ]
+        )
+    rooms_off = [r for r in all_rooms if not r.LookupParameter('CPI_Подсчёт отделки').AsInteger()]
+    print('\nПомещений в проекте всего: {}'.format(len(all_rooms)))
+    print('Помещений с нулевой площадью: {}'.format(len([r for r in all_rooms if r.Area == 0])))
+    print('Помещений с выключенным "CPI_Подсчёт отделки": {}'.format(len(rooms_off)))
+    print('Обработано {}'.format(len(rooms)))
+
+LIMIT = 50
+for message in errs:  # Вывод ошибок
+    print('\nПредупреждение: ' + message)
     element_ids_as_integer_value = sorted(list(errs[message]))
     element_ids = [db.ElementId(val) for val in element_ids_as_integer_value]
-    button_name = 'Выбрать {} шт.'.format(len(element_ids))
-    sel_all_button = output.linkify(element_ids, button_name)
-    print(sel_all_button + ' '.join([output.linkify(i) for i in element_ids]))
+    el_ids = element_ids[0:LIMIT]
+    too_big = len(element_ids) > LIMIT
+    button_name = 'Выбрать{} {}{}'.format(
+        ' первые ' if too_big else '',
+        len(el_ids),
+        ' из {} шт.'.format(len(element_ids)) if too_big else ' шт.'
+    )
+    sel_all_button = output.linkify(el_ids, button_name)
+    print(sel_all_button
+          + ' '.join([output.linkify(i) for i in el_ids])
+          + (' ...' if too_big else '')
+          )
