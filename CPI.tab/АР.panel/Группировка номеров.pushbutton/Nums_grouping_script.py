@@ -127,6 +127,8 @@ def get_grouped_numbers(rooms):
         if numo.prefix:
             if len(group) == 2:
                 s = '{0}.{1}, {0}.{2}'.format(numo.prefix, group[0].base, group[-1].base)
+                if group[0].base == group[-1].base:
+                    s = '{0}.{1}'.format(numo.prefix, group[0].base)
             else:
                 if group[0].base != group[-1].base:
                     s = '{0}.{1}÷{0}.{2}'.format(numo.prefix, group[0].base, group[-1].base)
@@ -135,6 +137,8 @@ def get_grouped_numbers(rooms):
         else:
             if len(group) == 2:
                 s = '{}, {}'.format(group[0].base, group[-1].base)
+                if group[0].base == group[-1].base:
+                    s = '{}'.format(group[0].base)
             else:
                 if group[0].base != group[-1].base:
                     s = '{}÷{}'.format(group[0].base, group[-1].base)
